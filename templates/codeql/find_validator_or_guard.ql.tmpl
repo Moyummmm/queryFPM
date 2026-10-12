@@ -1,0 +1,7 @@
+import java
+
+from IfStmt guard
+where guard.getLocation().getFile().getRelativePath() = {{file}}
+  and guard.getLocation().getStartLine() <= {{line}} + 20
+  and guard.getLocation().getStartLine() >= {{line}} - 20
+select guard, "Guard condition near alert path: " + guard.getCondition().toString()

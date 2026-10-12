@@ -1,0 +1,3 @@
+{"alert_id":"mini","alert_contract":{"cwe":"CWE-089"},"ground_truth":{"expected_vulnerable":true},"decision":{"verdict":"TP"}}
+{"alert_id":"mini2","alert_contract":{"cwe":"CWE-089"},"ground_truth":{"expected_vulnerable":false},"decision":{"verdict":"FP"}}
+{"alert_id":"mini3","alert_contract":{"cwe":"CWE-079"},"ground_truth":{"expected_vulnerable":false},"decision":{"verdict":"UNKNOWN"}}

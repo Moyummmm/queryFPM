@@ -1,0 +1,12 @@
+/**
+ * Placeholder path query.
+ * TODO: replace with CWE-specific TaintTracking::Configuration modules.
+ */
+import java
+
+from Expr source, Expr sink
+where source.getLocation().getFile().getRelativePath() = {{source_file}}
+  and source.getLocation().getStartLine() = {{source_line}}
+  and sink.getLocation().getFile().getRelativePath() = {{sink_file}}
+  and sink.getLocation().getStartLine() = {{sink_line}}
+select source, sink, "Candidate source and sink locations selected for path confirmation."

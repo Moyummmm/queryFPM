@@ -1,0 +1,16 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 45 and
+  e.getLocation().getStartLine() >= {{line}} - 80
+}
+
+predicate pathGuard(MethodCall call) {
+  call.getMethod().getName().regexpMatch("(?i)(getCanonicalPath|getCanonicalFile|normalize|startsWith|toRealPath|resolve)")
+}
+
+from MethodCall call
+where inWindow(call)
+  and pathGuard(call)
+select call, "Path validation/canonicalization evidence near alert: " + call.toString()

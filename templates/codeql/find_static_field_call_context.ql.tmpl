@@ -1,0 +1,45 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() = {{line}}
+}
+
+predicate constantStatus(Expr value, string status) {
+  value.isCompileTimeConstant() and status = "yes"
+  or
+  not value.isCompileTimeConstant() and status = "no"
+}
+
+predicate callerWritesFieldBeforeSink(
+  Callable sinkCallable,
+  Field field,
+  FieldWrite write,
+  Expr value,
+  MethodCall sinkCall
+) {
+  write.getField() = field and
+  value = write.getASource() and
+  sinkCall.getCaller() = write.getEnclosingCallable() and
+  sinkCall.getCallee().getSourceDeclaration() = sinkCallable.getSourceDeclaration() and
+  write.getLocation().getStartLine() <= sinkCall.getLocation().getStartLine()
+}
+
+from Expr anchor, Callable sinkCallable, FieldRead read, Field field,
+     FieldWrite write, Expr value, MethodCall sinkCall, string isConstant
+where
+  inWindow(anchor) and
+  sinkCallable = anchor.getEnclosingCallable() and
+  read.getEnclosingCallable() = sinkCallable and
+  field = read.getField() and
+  field.isStatic() and
+  field.getName() = {{field_name}} and
+  callerWritesFieldBeforeSink(sinkCallable, field, write, value, sinkCall) and
+  constantStatus(value, isConstant)
+select anchor,
+  "call-context evidence: field=" + field.getName() +
+  ", writer_calls_alert_sink=yes" +
+  ", write_line=" + write.getLocation().getStartLine().toString() +
+  ", sink_call_line=" + sinkCall.getLocation().getStartLine().toString() +
+  ", assigned_value=" + value.toString() +
+  ", compile_time_constant=" + isConstant

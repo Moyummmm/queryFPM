@@ -1,0 +1,177 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 10 and
+  e.getLocation().getStartLine() >= {{line}} - 100
+}
+
+predicate sessionWrite(MethodCall sink) {
+  inWindow(sink) and
+  sink.getMethod().getName().regexpMatch("(?i)(setAttribute|putValue)") and
+  (
+    sink.getMethod().getDeclaringType().hasQualifiedName("javax.servlet.http", "HttpSession")
+    or
+    sink.getMethod().getDeclaringType().hasQualifiedName("jakarta.servlet.http", "HttpSession")
+  )
+}
+
+predicate constantStatus(Expr value, string status) {
+  value.isCompileTimeConstant() and status = "yes"
+  or
+  not value.isCompileTimeConstant() and status = "no"
+}
+
+predicate sinkArgumentEvidence(MethodCall sink, string detail) {
+  exists(Expr name, Expr value, string nameConstant, string valueConstant |
+    name = sink.getArgument(0) and
+    value = sink.getArgument(1) and
+    constantStatus(name, nameConstant) and
+    constantStatus(value, valueConstant) and
+    detail =
+      "session sink arguments: name=" + name.toString() +
+      ", name_compile_time_constant=" + nameConstant +
+      ", value=" + value.toString() +
+      ", value_compile_time_constant=" + valueConstant
+  )
+}
+
+predicate localDefinitionEvidence(MethodCall sink, string detail) {
+  exists(int index, VarAccess access, LocalVariableDeclExpr decl, Expr init, string status |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    decl.getVariable() = access.getVariable() and
+    init = decl.getInit() and
+    constantStatus(init, status) and
+    detail =
+      "session argument " + index.toString() + " local initialization: " +
+      decl.getName() + " = " + init.toString() +
+      ", compile_time_constant=" + status
+  )
+  or
+  exists(int index, VarAccess access, AssignExpr assign, VarAccess destination, Expr value, string status |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    destination = assign.getDest() and
+    destination.getVariable() = access.getVariable() and
+    value = assign.getRhs() and
+    assign.getEnclosingCallable() = sink.getEnclosingCallable() and
+    assign.getLocation().getStartLine() <= sink.getLocation().getStartLine() and
+    constantStatus(value, status) and
+    detail =
+      "session argument " + index.toString() + " assignment: " +
+      destination.toString() + " = " + value.toString() +
+      ", compile_time_constant=" + status
+  )
+}
+
+predicate calleeReturnEvidence(MethodCall sink, string detail) {
+  exists(int index, VarAccess access, LocalVariableDeclExpr decl, MethodCall producer, ReturnStmt ret, Expr returned, string status |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    decl.getVariable() = access.getVariable() and
+    producer = decl.getInit() and
+    ret.getEnclosingCallable() = producer.getMethod() and
+    returned = ret.getExpr() and
+    constantStatus(returned, status) and
+    detail =
+      "session argument " + index.toString() + " producer return: method=" +
+      producer.getMethod().getQualifiedName() + ", expression=" + returned.toString() +
+      ", compile_time_constant=" + status
+  )
+  or
+  exists(int index, VarAccess access, LocalVariableDeclExpr sinkDecl, MethodCall producer,
+         ReturnStmt ret, VarAccess returned, LocalVariableDeclExpr returnedDecl, Expr init,
+         string status |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    sinkDecl.getVariable() = access.getVariable() and
+    producer = sinkDecl.getInit() and
+    ret.getEnclosingCallable() = producer.getMethod() and
+    returned = ret.getExpr() and
+    returnedDecl.getVariable() = returned.getVariable() and
+    returnedDecl.getEnclosingCallable() = producer.getMethod() and
+    init = returnedDecl.getInit() and
+    constantStatus(init, status) and
+    detail =
+      "session producer returned variable initialization: method=" +
+      producer.getMethod().getQualifiedName() + ", " + returnedDecl.getName() +
+      " = " + init.toString() + ", compile_time_constant=" + status
+  )
+  or
+  exists(int index, VarAccess access, LocalVariableDeclExpr sinkDecl, MethodCall producer,
+         ReturnStmt ret, VarAccess returned, AssignExpr assign, VarAccess destination,
+         Expr value, string status |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    sinkDecl.getVariable() = access.getVariable() and
+    producer = sinkDecl.getInit() and
+    ret.getEnclosingCallable() = producer.getMethod() and
+    returned = ret.getExpr() and
+    destination = assign.getDest() and
+    destination.getVariable() = returned.getVariable() and
+    assign.getEnclosingCallable() = producer.getMethod() and
+    value = assign.getRhs() and
+    constantStatus(value, status) and
+    detail =
+      "session producer returned variable assignment: method=" +
+      producer.getMethod().getQualifiedName() + ", " + destination.toString() +
+      " = " + value.toString() + ", compile_time_constant=" + status
+  )
+}
+
+predicate operationDefinesSinkArgument(MethodCall sink, MethodCall producer, int index) {
+  index = [0 .. 1] and producer = sink.getArgument(index)
+  or
+  exists(VarAccess access, LocalVariableDeclExpr decl |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    decl.getVariable() = access.getVariable() and
+    producer = decl.getInit()
+  )
+  or
+  exists(VarAccess access, AssignExpr assign, VarAccess destination |
+    index = [0 .. 1] and
+    access = sink.getArgument(index) and
+    destination = assign.getDest() and
+    destination.getVariable() = access.getVariable() and
+    producer = assign.getRhs() and
+    assign.getEnclosingCallable() = sink.getEnclosingCallable() and
+    assign.getLocation().getStartLine() <= sink.getLocation().getStartLine()
+  )
+}
+
+predicate sameReceiver(MethodCall left, MethodCall right) {
+  exists(VarAccess leftReceiver, VarAccess rightReceiver |
+    leftReceiver = left.getQualifier() and
+    rightReceiver = right.getQualifier() and
+    leftReceiver.getVariable() = rightReceiver.getVariable()
+  )
+}
+
+predicate collectionOperationEvidence(MethodCall sink, string detail) {
+  exists(MethodCall producer, MethodCall operation, int index, Expr argument |
+    operationDefinesSinkArgument(sink, producer, index) and
+    producer.getMethod().getName().regexpMatch("(?i)(get|remove)") and
+    sameReceiver(operation, producer) and
+    operation.getLocation().getStartLine() <= producer.getLocation().getStartLine() and
+    operation.getMethod().getName().regexpMatch("(?i)(add|remove|put|set)") and
+    argument = operation.getAnArgument() and
+    detail =
+      "session argument " + index.toString() +
+      " collection origin: producer=" + producer.toString() +
+      ", prior_operation_line=" +
+      operation.getLocation().getStartLine().toString() +
+      ", method=" + operation.getMethod().getName() +
+      ", argument=" + argument.toString()
+  )
+}
+
+from MethodCall sink, string detail
+where sessionWrite(sink) and (
+  sinkArgumentEvidence(sink, detail)
+  or localDefinitionEvidence(sink, detail)
+  or calleeReturnEvidence(sink, detail)
+  or collectionOperationEvidence(sink, detail)
+)
+select sink, detail

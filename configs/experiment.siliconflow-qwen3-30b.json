@@ -1,0 +1,42 @@
+{
+  "dataset": {
+    "name": "OWASP Benchmark Java",
+    "version": "1.2",
+    "expected_results": "BenchmarkJava/expectedresults-1.2.csv",
+    "source_root": "BenchmarkJava"
+  },
+  "codeql": {
+    "database": "data/codeql-db/owasp-benchmark-java-1.2-codeql-2.25.5-frozen",
+    "query_suite": "codeql/java-queries:codeql-suites/java-code-scanning.qls",
+    "sarif": "data/raw/owasp-benchmark-java-1.2-codeql-2.25.5-frozen-default.sarif",
+    "template_manifest": "templates/codeql/templates.json",
+    "codeql_bin": "/home/smy/FPM/tools/codeql-bundle-v2.25.5/codeql/codeql",
+    "additional_packs_root": "/home/smy/FPM/tools/codeql-bundle-v2.25.5/codeql/qlpacks/codeql"
+  },
+  "llm": {
+    "provider": "siliconflow",
+    "api_key_env": "SILICONFLOW_API_KEY",
+    "model": "Qwen/Qwen3-30B-A3B-Instruct-2507",
+    "base_url": "https://api.siliconflow.cn/v1",
+    "temperature": 0,
+    "max_output_tokens": 4096,
+    "timeout_seconds": 180,
+    "max_retries": 3
+  },
+  "experiment": {
+    "max_iterations": 3,
+    "allow_unknown": true,
+    "target_cwes": [
+      "CWE-022",
+      "CWE-078",
+      "CWE-079",
+      "CWE-089",
+      "CWE-090",
+      "CWE-327",
+      "CWE-330",
+      "CWE-501",
+      "CWE-614",
+      "CWE-643"
+    ]
+  }
+}

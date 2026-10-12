@@ -1,0 +1,35 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 35 and
+  e.getLocation().getStartLine() >= {{line}} - 80
+}
+
+predicate commandCall(Call call) {
+  exists(MethodCall methodCall |
+    call = methodCall and
+    methodCall.getMethod().getName().regexpMatch("(?i)(exec|start)")
+  )
+  or
+  exists(ClassInstanceExpr ctor |
+    call = ctor and
+    ctor.getConstructedType().hasQualifiedName("java.lang", "ProcessBuilder")
+  )
+}
+
+predicate constantStatus(Expr arg, string status) {
+  arg.isCompileTimeConstant() and status = "yes"
+  or
+  not arg.isCompileTimeConstant() and status = "no"
+}
+
+from Call call, Expr arg, string status
+where inWindow(call)
+  and commandCall(call)
+  and arg = call.getAnArgument()
+  and constantStatus(arg, status)
+select call,
+  "Command execution evidence: call=" + call.toString() +
+  ", arg=" + arg.toString() +
+  ", arg_compile_time_constant=" + status

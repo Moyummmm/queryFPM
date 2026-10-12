@@ -1,0 +1,41 @@
+{
+  "dataset": {
+    "name": "OWASP Benchmark Java",
+    "version": "1.2",
+    "expected_results": "BenchmarkJava/expectedresults-1.2.csv",
+    "source_root": "BenchmarkJava"
+  },
+  "codeql": {
+    "database": "benchmark-db",
+    "query_suite": "codeql/java-queries",
+    "sarif": "data/raw/codeql-default.sarif",
+    "template_manifest": "templates/codeql/templates.json",
+    "codeql_bin": "/home/smy/paper2/tools/codeql/codeql",
+    "additional_packs_root": "/home/smy/.codeql/packages/codeql"
+  },
+  "llm": {
+    "provider": "opencode-go",
+    "model": "deepseek-v4-flash",
+    "base_url": "https://opencode.ai/zen/go/v1",
+    "temperature": 0,
+    "max_output_tokens": 4096,
+    "timeout_seconds": 120,
+    "max_retries": 2
+  },
+  "experiment": {
+    "max_iterations": 3,
+    "allow_unknown": true,
+    "target_cwes": [
+      "CWE-022",
+      "CWE-078",
+      "CWE-079",
+      "CWE-089",
+      "CWE-090",
+      "CWE-327",
+      "CWE-330",
+      "CWE-501",
+      "CWE-614",
+      "CWE-643"
+    ]
+  }
+}

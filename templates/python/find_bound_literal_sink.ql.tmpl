@@ -1,0 +1,27 @@
+import python
+import semmle.python.ApiGraphs
+import semmle.python.dataflow.new.DataFlow
+
+predicate knownSink(Call call, string cwe) {
+  cwe = "CWE-078" and
+  exists(API::CallNode node |
+    node = API::moduleImport("os").getMember("system").getACall() and call = node.asExpr()
+  )
+  or
+  cwe = "CWE-089" and
+  exists(API::CallNode node |
+    node = API::moduleImport("sqlite3").getMember("connect").getReturn()
+      .getMember("execute").getACall() and call = node.asExpr()
+  )
+}
+
+from Call call, StringLiteral arg
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and knownSink(call, {{cwe}}) and arg = call.getArg(0)
+  and (
+    call.getLocation().getStartLine() = {{line}} and call.getLocation().getStartColumn() = {{column}}
+    or arg.getLocation().getStartLine() = {{line}} and arg.getLocation().getStartColumn() = {{column}}
+  )
+select "fpm-bound-v1", "literal_sink_argument", {{cwe}},
+  call.getLocation().getFile().getRelativePath(), {{line}}, {{column}},
+  arg.toString(), arg.getText(), "literal-actual-argument-v1"

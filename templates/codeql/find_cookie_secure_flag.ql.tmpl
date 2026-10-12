@@ -1,0 +1,8 @@
+import java
+
+from MethodCall call
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and call.getLocation().getStartLine() <= {{line}} + 30
+  and call.getLocation().getStartLine() >= {{line}} - 5
+  and call.getMethod().getName() = "setSecure"
+select call, "Cookie setSecure call near alert: " + call.toString()

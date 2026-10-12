@@ -1,0 +1,1764 @@
+/**
+ * Bound constant-value certificate (explicit-bound-v3). GENERATED FILE — edit
+ * scripts/gen_constant_value_template.py and re-run it.
+ *
+ * Certifies that the value reaching the alert's sink is a compile-time constant under
+ * reviewed evidence families (local, no-alias analyses with independent negative tests):
+ *  - container-list-slot-constant-v1    : local List slot after add-run / remove(0) shifts.
+ *  - container-map-slot-constant-v1     : local Map key whose last write is a constant.
+ *  - container-all-elements-constant-v1 : local collection/array passed whole, elements constant.
+ *  - constant-selector-branch-v1        : value selected by a switch with a constant selector.
+ * Constant chains through casts, concatenation, local variables (dominance / all-definitions
+ * reasoning), File / Paths construction and source-available helpers are followed across
+ * 10 unrolled levels. Parameters and fields never certify.
+ */
+import java
+import semmle.code.java.controlflow.Dominance
+
+pragma[noinline]
+predicate point(Expr expression, string file, int line, int column) {
+  exists(Location loc |
+    loc = expression.getLocation() and file = loc.getFile().getRelativePath() and
+    line = loc.getStartLine() and column = loc.getStartColumn()
+  )
+}
+
+// Ordering checks compare a single position integer (line * 100000 + column) from
+// the elemPos function. A shared before/beforeStmt predicate was materialized by the
+// evaluator as the full relation over expression pairs (quadratic on the benchmark
+// database); inlined function calls evaluate per call site with both sides bound.
+int elemPos(Element e) {
+  result = e.getLocation().getStartLine() * 100000 + e.getLocation().getStartColumn()
+}
+
+predicate firstStringArgument(Call call, Expr value) {
+  value = call.getAnArgument() and
+  value.getType().(RefType).hasQualifiedName("java.lang", "String") and
+  not exists(Expr earlier |
+    earlier = call.getAnArgument() and earlier.getIndex() < value.getIndex() and
+    earlier.getType().(RefType).hasQualifiedName("java.lang", "String"))
+}
+
+predicate dirContextReceiver(Call call) {
+  call.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("javax.naming.directory", "DirContext")
+}
+
+predicate isFileQueryMethod(Method m) {
+  m.getDeclaringType().hasQualifiedName("java.io", "File") and
+  m.getName().regexpMatch("exists|isFile|isDirectory|canRead|canWrite|canExecute|getCanonicalPath|getAbsolutePath|getPath|toString|length")
+}
+
+predicate valueAnchor(Call call, Expr value) {
+  {{cwe}} = "CWE-089" and value = call.getArgument(0) and
+  (
+    call.getCallee().getDeclaringType().hasQualifiedName("java.sql", "Statement") and
+    call.getCallee().getName().regexpMatch("execute|executeQuery|executeUpdate|addBatch|executeBatch")
+    or
+    call.getCallee().getDeclaringType().hasQualifiedName("org.springframework.jdbc.core", "JdbcTemplate") and
+    call.getCallee().getName().regexpMatch("execute|batchUpdate|update|query|queryFor.*")
+    or
+    call.getCallee().getDeclaringType().hasQualifiedName("java.sql", "Connection") and
+    call.getCallee().getName().regexpMatch("prepareStatement|prepareCall")
+  )
+  or
+  {{cwe}} = "CWE-079" and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.io", "PrintWriter") and
+  call.getCallee().getName().regexpMatch("print|println|write|printf|format|append") and
+  firstStringArgument(call, value)
+  or
+  {{cwe}} = "CWE-078" and (
+    call.getCallee().getDeclaringType().hasQualifiedName("java.lang", "Runtime") and
+    call.getCallee().hasName("exec") and value = call.getArgument(0)
+    or
+    call instanceof ConstructorCall and call.getCallee().hasName("ProcessBuilder") and value = call.getArgument(0)
+    or
+    call.getCallee().hasName("command") and
+    call.getCallee().getDeclaringType().hasQualifiedName("java.lang", "ProcessBuilder") and
+    value = call.getArgument(0)
+  )
+  or
+  {{cwe}} = "CWE-022" and (
+    value = call and call instanceof ConstructorCall and
+    call.getCallee().getDeclaringType().hasQualifiedName("java.io", "File")
+    or
+    value = call.getArgument(0) and call instanceof ConstructorCall and
+    exists(string t | t = call.getCallee().getDeclaringType().getQualifiedName() |
+      t = "java.io.FileInputStream" or t = "java.io.FileOutputStream" or t = "java.io.RandomAccessFile" or
+      t = "java.io.FileReader" or t = "java.io.FileWriter")
+    or
+    value = call.getArgument(0) and
+    call.getCallee().getDeclaringType().hasQualifiedName("java.nio.file", "Files") and
+    call.getCallee().getName().regexpMatch("newInputStream|newOutputStream|readAllBytes|readAllLines|exists|isRegularFile")
+    or
+    value = call.getArgument(0) and call.getCallee().hasQualifiedName("java.nio.file", "Paths", "get")
+    or
+    value = call.getQualifier() and call instanceof MethodCall and isFileQueryMethod(call.getCallee())
+  )
+  or
+  {{cwe}} = "CWE-090" and value = call.getArgument(1) and
+  call.getCallee().hasName("search") and dirContextReceiver(call)
+  or
+  {{cwe}} = "CWE-643" and value = call.getArgument(0) and
+  call.getCallee().getDeclaringType().hasQualifiedName("javax.xml.xpath", "XPath") and
+  call.getCallee().getName().regexpMatch("evaluate|compile")
+}
+
+predicate plainConstant(Expr e, string value) { value = e.(CompileTimeConstantExpr).getStringValue() }
+
+predicate intConstant(Expr e, int value) { value = e.(CompileTimeConstantExpr).getIntValue() }
+
+predicate collectionConstructor(Expr e) {
+  exists(ConstructorCall cc | cc = e |
+    cc.getNumArgument() = 0 and
+    (cc.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Collection") or
+     cc.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map")))
+}
+
+predicate loopFree(Stmt s) { not exists(LoopStmt loop | loop.getAChild+() = s) }
+
+predicate accessesConfined(LocalVariableDecl v, Expr exempt) {
+  forall(VarAccess a | a.getVariable() = v |
+    a = exempt or exempt.getAChildExpr*() = a or
+    exists(MethodCall mc | mc.getQualifier() = a))
+}
+
+predicate simpleUpdate(Expr e, LocalVariableDecl v) {
+  exists(AssignExpr a | e = a and a.getDest().(VarAccess).getVariable() = v)
+  or
+  exists(AssignOp op | e = op and op.getDest().(VarAccess).getVariable() = v)
+}
+
+predicate defExpr(LocalVariableDecl v, Expr rhs) {
+  exists(LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    ds.getAVariable() = de and de.getVariable() = v and rhs = de.getInit())
+  or
+  exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v and rhs = a.getSource())
+  or
+  exists(AssignOp op | op.getDest().(VarAccess).getVariable() = v and rhs = op)
+}
+
+predicate constCaseHasInt(ConstCase cc, int sv) {
+  exists(Expr v | v = cc.getValue(_) | intConstant(v, sv))
+}
+
+predicate caseStringValue(Expr v, string s) {
+  v.(StringLiteral).getValue() = s
+  or
+  exists(string t | t = v.toString() and t.matches("'_'") and s = t.substring(1, 2))
+}
+
+predicate constCaseHasString(ConstCase cc, string s) {
+  exists(Expr v | v = cc.getValue(_) | caseStringValue(v, s))
+}
+
+predicate selectorIntValue(Expr sel, int value) {
+  intConstant(sel, value)
+  or
+  exists(VarAccess va | sel = va |
+    exists(AssignExpr reset | reset.getDest() = va and selectorIntValue(reset.getSource(), value))
+    or
+    exists(LocalVariableDeclExpr de |
+      de.getVariable() = va.getVariable().(LocalVariableDecl) and selectorIntValue(de.getInit(), value)))
+}
+
+predicate selectorStringValue(Expr sel, string s) {
+  plainConstant(sel, s)
+  or
+  exists(MethodCall ca, string base, int idx |
+    sel = ca and ca.getCallee().hasQualifiedName("java.lang", "String", "charAt") and
+    intConstant(ca.getArgument(0), idx) and selectorStringValue(ca.getQualifier(), base) and
+    s = base.substring(idx, idx + 1))
+  or
+  exists(VarAccess va | sel = va |
+    exists(AssignExpr reset | reset.getDest() = va and selectorStringValue(reset.getSource(), s))
+    or
+    exists(LocalVariableDeclExpr de |
+      de.getVariable() = va.getVariable().(LocalVariableDecl) and selectorStringValue(de.getInit(), s)))
+}
+
+predicate selectorIsConstant(Expr sel) {
+  exists(int i | selectorIntValue(sel, i))
+  or
+  exists(string s | selectorStringValue(sel, s))
+}
+
+predicate selectorMatches(SwitchStmt sw, SwitchCase matched) {
+  exists(int sv | selectorIntValue(sw.getExpr(), sv) |
+    exists(ConstCase cc | cc = matched and constCaseHasInt(cc, sv)))
+  or
+  exists(string s | selectorStringValue(sw.getExpr(), s) |
+    exists(ConstCase cc | cc = matched and constCaseHasString(cc, s))
+    or
+    (matched = sw.getDefaultCase() and
+     not exists(ConstCase cc2 | cc2 = sw.getACase() and constCaseHasString(cc2, s))))
+}
+
+predicate switchBranchConstant(LocalVariableDecl v, AssignExpr reset, SwitchStmt sw) {
+  selectorIsConstant(sw.getExpr()) and
+  exists(SwitchCase matched, ExprStmt resetStmt, BreakStmt br |
+    matched = sw.getACase() and selectorMatches(sw, matched) and
+    resetStmt = reset.getEnclosingStmt() and resetStmt.getParent() = sw and
+    reset.getDest().(VarAccess).getVariable() = v and
+    matched.getIndex() < resetStmt.getIndex() and
+    forall(Stmt s | s.getParent() = sw and s.getIndex() > matched.getIndex() and
+      s.getIndex() < resetStmt.getIndex() | s instanceof SwitchCase) and
+    br.getParent() = sw and br.getIndex() > resetStmt.getIndex() and
+    not exists(SwitchCase nc | nc.getParent() = sw and nc.getIndex() > resetStmt.getIndex() and
+      nc.getIndex() < br.getIndex()) and
+    not exists(Expr w | simpleUpdate(w, v) and (elemPos(reset) < elemPos(w)) and (elemPos(w) < elemPos(br)) and
+      exists(Stmt ws | ws = w.getEnclosingStmt() and sw.getAChild*() = ws)))
+}
+
+predicate kindProof(string kind, string proof) {
+  kind = "container_list_value" and proof = "container-list-slot-constant-v1"
+  or kind = "container_map_value" and proof = "container-map-slot-constant-v1"
+  or kind = "container_aggregate_value" and proof = "container-all-elements-constant-v1"
+  or kind = "constant_branch_value" and proof = "constant-selector-branch-v1"
+}
+
+predicate certified_value_1(Expr e, string value, string kind) {
+  (plainConstant(e, value) and kind = "")
+}
+
+predicate certified_value_2(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_1(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_1(a.getLeftOperand(), lv, lk) and
+      certified_value_1(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_1(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_1(cc.getArgument(0), dirv, k1) and
+       certified_value_1(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_1(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_2(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_2(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_2(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_2(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_2(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_2(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_1(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_1(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_1(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_1(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_1(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_2(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_1(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_2(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_1(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_2(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_1(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_1(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_1(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_2(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_1(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_1(res2, v3, k3))))
+}
+
+predicate certified_value_3(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_2(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_2(a.getLeftOperand(), lv, lk) and
+      certified_value_2(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_2(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_2(cc.getArgument(0), dirv, k1) and
+       certified_value_2(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_2(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_3(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_3(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_3(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_3(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_3(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_3(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_2(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_2(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_2(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_2(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_2(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_3(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_2(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_3(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_2(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_3(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_2(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_2(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_2(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_3(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_2(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_2(res2, v3, k3))))
+}
+
+predicate certified_value_4(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_3(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_3(a.getLeftOperand(), lv, lk) and
+      certified_value_3(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_3(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_3(cc.getArgument(0), dirv, k1) and
+       certified_value_3(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_3(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_4(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_4(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_4(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_4(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_4(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_4(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_3(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_3(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_3(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_3(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_3(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_4(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_3(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_4(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_3(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_4(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_3(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_3(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_3(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_4(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_3(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_3(res2, v3, k3))))
+}
+
+predicate certified_value_5(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_4(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_4(a.getLeftOperand(), lv, lk) and
+      certified_value_4(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_4(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_4(cc.getArgument(0), dirv, k1) and
+       certified_value_4(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_4(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_5(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_5(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_5(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_5(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_5(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_5(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_4(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_4(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_4(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_4(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_4(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_5(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_4(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_5(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_4(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_5(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_4(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_4(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_4(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_5(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_4(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_4(res2, v3, k3))))
+}
+
+predicate certified_value_6(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_5(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_5(a.getLeftOperand(), lv, lk) and
+      certified_value_5(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_5(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_5(cc.getArgument(0), dirv, k1) and
+       certified_value_5(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_5(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_6(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_6(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_6(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_6(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_6(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_6(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_5(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_5(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_5(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_5(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_5(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_6(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_5(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_6(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_5(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_6(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_5(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_5(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_5(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_6(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_5(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_5(res2, v3, k3))))
+}
+
+predicate certified_value_7(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_6(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_6(a.getLeftOperand(), lv, lk) and
+      certified_value_6(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_6(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_6(cc.getArgument(0), dirv, k1) and
+       certified_value_6(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_6(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_7(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_7(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_7(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_7(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_7(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_7(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_6(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_6(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_6(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_6(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_6(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_7(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_6(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_7(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_6(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_7(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_6(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_6(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_6(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_7(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_6(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_6(res2, v3, k3))))
+}
+
+predicate certified_value_8(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_7(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_7(a.getLeftOperand(), lv, lk) and
+      certified_value_7(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_7(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_7(cc.getArgument(0), dirv, k1) and
+       certified_value_7(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_7(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_8(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_8(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_8(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_8(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_8(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_8(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_7(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_7(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_7(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_7(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_7(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_8(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_7(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_8(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_7(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_8(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_7(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_7(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_7(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_8(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_7(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_7(res2, v3, k3))))
+}
+
+predicate certified_value_9(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_8(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_8(a.getLeftOperand(), lv, lk) and
+      certified_value_8(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_8(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_8(cc.getArgument(0), dirv, k1) and
+       certified_value_8(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_8(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_9(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_9(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_9(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_9(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_9(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_9(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_8(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_8(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_8(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_8(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_8(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_9(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_8(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_9(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_8(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_9(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_8(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_8(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_8(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_9(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_8(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_8(res2, v3, k3))))
+}
+
+predicate certified_value_10(Expr e, string value, string kind) {
+  (
+    plainConstant(e, value) and kind = ""
+    or
+    exists(CastExpr c | e = c and certified_value_9(c.getExpr(), value, kind))
+    or
+    exists(AddExpr a, string lv, string rv, string lk, string rk |
+      e = a and a.getType().(RefType).hasQualifiedName("java.lang", "String") and
+      certified_value_9(a.getLeftOperand(), lv, lk) and
+      certified_value_9(a.getRightOperand(), rv, rk) and
+      value = lv + rv and
+      (if lk != "" then kind = lk else kind = rk))
+    or
+    exists(ConstructorCall cc, string dirv, string namev, string k1, string k2 |
+      e = cc and cc.getCallee().getDeclaringType().hasQualifiedName("java.io", "File") and
+      (cc.getNumArgument() = 1 and
+       certified_value_9(cc.getArgument(0), namev, k1) and dirv = "" and k2 = ""
+       or
+       cc.getNumArgument() = 2 and
+       certified_value_9(cc.getArgument(0), dirv, k1) and
+       certified_value_9(cc.getArgument(1), namev, k2)) and
+      value = dirv + "/" + namev and
+      (if k1 != "" then kind = k1 else kind = k2))
+    or
+    exists(MethodCall pg, string pv, string k |
+      e = pg and pg.getCallee().hasQualifiedName("java.nio.file", "Paths", "get") and
+      certified_value_9(pg.getArgument(0), pv, k) and value = pv and kind = k)
+    or
+    exists(VarAccess va | e = va and certified_variable_10(va, value, kind))
+    or
+    exists(MethodCall mc | e = mc and helper_returns_10(mc, value, kind))
+    or
+    exists(MethodCall read, VarAccess c, int slot, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "List") and
+      intConstant(read.getArgument(0), slot) and
+      list_slot_10(c, read, slot, sv) and value = sv and kind = "container_list_value")
+    or
+    exists(MethodCall read, VarAccess c, string key, string sv |
+      e = read and c = read.getQualifier() and read.getCallee().hasName("get") and
+      read.getCallee().getDeclaringType().getASupertype*().getSourceDeclaration().hasQualifiedName("java.util", "Map") and
+      plainConstant(read.getArgument(0), key) and
+      map_slot_10(c, read, key, sv) and value = sv and kind = "container_map_value")
+    or
+    exists(VarAccess va | e = va and aggregate_10(va, value) and kind = "container_aggregate_value")
+  )
+}
+
+predicate certified_variable_10(VarAccess va, string value, string kind) {
+  exists(LocalVariableDecl v | v = va.getVariable().(LocalVariableDecl) and loopFree(va.getEnclosingStmt()) |
+    exists(AssignExpr reset |
+      reset.getDest().(VarAccess).getVariable() = v and
+      certified_value_9(reset.getSource(), value, kind) and
+      dominates(reset.getControlFlowNode(), va.getControlFlowNode()) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(reset) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(reset.getEnclosingStmt()))
+    or
+    exists(LocalVariableDeclExpr de2 |
+      de2.getVariable() = v and
+      certified_value_9(de2.getInit(), value, kind) and
+      not exists(Expr other | simpleUpdate(other, v) and (elemPos(de2.getInit()) < elemPos(other)) and (elemPos(other) < elemPos(va))) and
+      loopFree(de2.getEnclosingStmt()))
+    or
+    (exists(Expr d0 | defExpr(v, d0) and (elemPos(d0) < elemPos(va))) and
+     forall(Expr d | defExpr(v, d) and (elemPos(d) < elemPos(va)) |
+       exists(string v2, string k2 | certified_value_9(d, v2, k2))) and
+     exists(Expr d2, string v3, string k3 |
+       defExpr(v, d2) and (elemPos(d2) < elemPos(va)) and
+       certified_value_9(d2, v3, k3) and
+       value = v3 and kind = k3 and loopFree(d2.getEnclosingStmt())))
+    or
+    exists(AssignExpr reset, SwitchStmt sw |
+      switchBranchConstant(v, reset, sw) and
+      certified_value_9(reset.getSource(), value, _) and
+      kind = "constant_branch_value" and loopFree(sw) and
+      not exists(Stmt s | s = va.getEnclosingStmt() and sw.getAChild*() = s) and
+      forall(Expr o | simpleUpdate(o, v) and (elemPos(reset) < elemPos(o)) and (elemPos(o) < elemPos(va)) |
+        exists(Stmt s | s = o.getEnclosingStmt() and sw.getAChild*() = s)))
+  )
+}
+
+predicate list_slot_10(VarAccess c, MethodCall read, int slot, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("add") or
+        mc.getCallee().hasName("get") or
+        exists(int zero | intConstant(mc.getArgument(0), zero) and mc.getCallee().hasName("remove") and zero = 0))) and
+    forall(MethodCall rm, MethodCall ad |
+      rm.getCallee().hasName("remove") and rm.getQualifier().(VarAccess).getVariable() = v and
+      ad.getCallee().hasName("add") and ad.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(ad) < elemPos(rm)) | ad.getLocation().getStartLine() < rm.getLocation().getStartLine()) and
+    exists(int n, int r, MethodCall target |
+      n = count(MethodCall ad | ad.getCallee().hasName("add") and
+        ad.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad) < elemPos(read))) and
+      r = count(MethodCall rm | rm.getCallee().hasName("remove") and
+        rm.getQualifier().(VarAccess).getVariable() = v and (elemPos(rm) < elemPos(read))) and
+      slot + r < n and
+      target.getCallee().hasName("add") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and
+      count(MethodCall ad2 | ad2.getCallee().hasName("add") and
+        ad2.getQualifier().(VarAccess).getVariable() = v and (elemPos(ad2) < elemPos(target))) = slot + r and
+      certified_value_9(target.getArgument(0), value, _)))
+}
+
+predicate map_slot_10(VarAccess c, MethodCall read, string key, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de, Stmt readStmt |
+    v = c.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and collectionConstructor(de.getInit()) and
+    loopFree(ds) and accessesConfined(v, read) and
+    readStmt = read.getEnclosingStmt() and ds.getParent() = readStmt.getParent() and
+    ds.getIndex() < readStmt.getIndex() and
+    forall(MethodCall put | put.getCallee().hasName("put") and
+      put.getQualifier().(VarAccess).getVariable() = v and (elemPos(put) < elemPos(read)) |
+      exists(string k | plainConstant(put.getArgument(0), k))) and
+    forall(ExprStmt es | es.getParent() = readStmt.getParent() and
+      es.getIndex() > ds.getIndex() and es.getIndex() < readStmt.getIndex() and
+      exists(VarAccess a | a.getVariable() = v and a.getEnclosingStmt() = es) |
+      exists(MethodCall mc | mc.getEnclosingStmt() = es and mc.getQualifier().(VarAccess).getVariable() = v |
+        mc.getCallee().hasName("put") or mc.getCallee().hasName("get"))) and
+    exists(MethodCall target |
+      target.getCallee().hasName("put") and target.getQualifier().(VarAccess).getVariable() = v and
+      (elemPos(target) < elemPos(read)) and plainConstant(target.getArgument(0), key) and
+      not exists(MethodCall later | later.getCallee().hasName("put") and
+        later.getQualifier().(VarAccess).getVariable() = v and
+        (elemPos(target) < elemPos(later)) and (elemPos(later) < elemPos(read)) and
+        plainConstant(later.getArgument(0), key)) and
+      certified_value_9(target.getArgument(1), value, _)))
+}
+
+predicate aggregate_10(VarAccess va, string value) {
+  exists(LocalVariableDecl v, LocalVariableDeclStmt ds, LocalVariableDeclExpr de |
+    v = va.getVariable().(LocalVariableDecl) and
+    ds.getAVariable() = de and de.getVariable() = v and
+    loopFree(ds) and accessesConfined(v, va) and
+    not exists(AssignExpr a | a.getDest().(VarAccess).getVariable() = v) and
+    forall(MethodCall mc | mc.getQualifier().(VarAccess).getVariable() = v |
+      mc.getCallee().hasName("add") and
+      exists(string ev | certified_value_9(mc.getArgument(0), ev, _))) and
+    (
+      collectionConstructor(de.getInit())
+      or
+      exists(ArrayInit ai | ai = de.getInit() |
+        forall(Expr el | el = ai.getAnInit() | exists(string ev | certified_value_9(el, ev, _))))
+      or
+      exists(ArrayCreationExpr ace | ace = de.getInit() |
+        forall(Expr el | el = ace.getInit().getAnInit() | exists(string ev | certified_value_9(el, ev, _))))
+    ) and
+    value = "aggregate-constant")
+}
+
+predicate helper_returns_10(MethodCall mc, string value, string kind) {
+  exists(Method m |
+    m = mc.getMethod().getSourceDeclaration() and exists(m.getBody()) and
+    exists(ReturnStmt r, Expr res, string v2, string k2 |
+      r.getEnclosingCallable() = m and res = r.getExpr() and
+      certified_value_9(res, v2, k2) and value = v2 and kind = k2) and
+    forall(ReturnStmt r | r.getEnclosingCallable() = m |
+      not exists(r.getExpr()) or
+      exists(Expr res2, string v3, string k3 |
+        res2 = r.getExpr() and certified_value_9(res2, v3, k3))))
+}
+
+from Call call, Expr value, string v, string kind, string proof
+where valueAnchor(call, value)
+  and certified_value_10(pragma[only_bind_into](value), v, kind)
+  and kind != ""
+  and kindProof(kind, proof)
+  and (
+    point(call, {{file}}, {{line}}, {{column}})
+    or point(value, {{file}}, {{line}}, {{column}})
+    or exists(Expr qualifier | qualifier = call.getQualifier() and point(qualifier, {{file}}, {{line}}, {{column}}))
+  )
+select "fpm-bound-v1", kind, {{cwe}}, {{file}}, {{line}}, {{column}},
+  value.toString(), v, proof

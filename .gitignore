@@ -1,0 +1,33 @@
+.env
+*.pyc
+__pycache__/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Large experiment artifacts
+data/
+benchmark-db/
+BenchmarkJava/
+codeql-home/
+*.bqrs
+*.sarif
+*.sarif.json
+# 本地工具链与构建缓存（scripts/bootstrap_*.sh 可重建）
+tools/codeql-bundle-*/
+tools/codeql-queries-*/
+tools/jdk-*/
+tools/apache-maven/
+.m2/
+.marscode/
+
+# 日志
+*.log
+
+# 常见临时文件
+__pycache__/
+*.pyc
+.idea/
+.vscode/

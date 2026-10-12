@@ -1,0 +1,120 @@
+import java
+import semmle.code.java.dataflow.RangeAnalysis
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 120 and
+  e.getLocation().getStartLine() >= {{line}} - 100
+}
+
+predicate constantStatus(Expr value, string status) {
+  value.isCompileTimeConstant() and status = "yes"
+  or
+  not value.isCompileTimeConstant() and status = "no"
+}
+
+predicate exactIntValue(Expr value, int exact) {
+  bounded(value, any(ZeroBound upperZero), exact, true, _) and
+  bounded(value, any(ZeroBound lowerZero), exact, false, _)
+}
+
+bindingset[condition, left, right]
+predicate comparisonOutcome(BinaryExpr condition, int left, int right, string outcome) {
+  condition instanceof GTExpr and
+  (left > right and outcome = "true" or left <= right and outcome = "false")
+  or
+  condition instanceof GEExpr and
+  (left >= right and outcome = "true" or left < right and outcome = "false")
+  or
+  condition instanceof LTExpr and
+  (left < right and outcome = "true" or left >= right and outcome = "false")
+  or
+  condition instanceof LEExpr and
+  (left <= right and outcome = "true" or left > right and outcome = "false")
+  or
+  condition instanceof EQExpr and
+  (left = right and outcome = "true" or left != right and outcome = "false")
+  or
+  condition instanceof NEExpr and
+  (left != right and outcome = "true" or left = right and outcome = "false")
+}
+
+predicate conditionEvaluation(IfStmt guard, string detail) {
+  exists(BinaryExpr condition, int left, int right, string outcome |
+    condition = guard.getCondition() and
+    exactIntValue(condition.getLeftOperand(), left) and
+    exactIntValue(condition.getRightOperand(), right) and
+    comparisonOutcome(condition, left, right, outcome) and
+    detail =
+      ", condition_exact_values: left=" + left.toString() +
+      ", operator='" + condition.getOp() + "'" +
+      ", right=" + right.toString() +
+      ", result=" + outcome
+  )
+  or
+  not exists(BinaryExpr condition, int left, int right, string outcome |
+    condition = guard.getCondition() and
+    exactIntValue(condition.getLeftOperand(), left) and
+    exactIntValue(condition.getRightOperand(), right) and
+    comparisonOutcome(condition, left, right, outcome)
+  ) and
+  detail = ", condition_exact_values: unavailable"
+}
+
+predicate directConstantEvidence(Expr write, string message) {
+  exists(LocalVariableDeclExpr decl, Expr value |
+    write = decl and
+    value = decl.getInit() and
+    value.isCompileTimeConstant() and
+    message = "direct constant local initialization: " + decl.getName() + " = " + value.toString()
+  )
+  or
+  exists(AssignExpr assign, Expr value |
+    write = assign and
+    value = assign.getRhs() and
+    value.isCompileTimeConstant() and
+    message = "direct constant assignment: " + assign.getDest().toString() + " = " + value.toString()
+  )
+}
+
+predicate derivedConstantEvidence(Expr write, string message) {
+  exists(LocalVariableDeclExpr decl, MethodCall call, VarAccess arg, LocalVariableDeclExpr sourceDecl, Expr sourceValue |
+    write = decl and
+    call = decl.getInit() and
+    arg = call.getAnArgument() and
+    sourceDecl.getVariable() = arg.getVariable() and
+    sourceValue = sourceDecl.getInit() and
+    sourceValue.isCompileTimeConstant() and
+    message =
+      "derived-from-constant initialization: " + decl.getName() + " = " + call.toString() +
+      "; argument " + arg.toString() + " initialized as " + sourceValue.toString()
+  )
+}
+
+predicate branchAssignmentEvidence(Expr write, string message) {
+  exists(IfStmt guard, AssignExpr assign, Expr value, string branch, string status, string detail |
+    write = assign and
+    inWindow(guard) and
+    value = assign.getRhs() and
+    constantStatus(value, status) and
+    (
+      branch = "then" and assign.getEnclosingStmt().getEnclosingStmt*() = guard.getThen()
+      or
+      branch = "else" and assign.getEnclosingStmt().getEnclosingStmt*() = guard.getElse()
+    ) and
+    conditionEvaluation(guard, detail) and
+    message =
+      "branch assignment: if (" + guard.getCondition().toString() + ") branch=" + branch +
+      ", " + assign.getDest().toString() + " = " + value.toString() +
+      ", value_compile_time_constant=" + status + detail
+  )
+}
+
+from Expr write, string message
+where inWindow(write)
+  and (
+    directConstantEvidence(write, message)
+    or derivedConstantEvidence(write, message)
+    or branchAssignmentEvidence(write, message)
+  )
+select write, message

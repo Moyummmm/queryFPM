@@ -1,0 +1,19 @@
+[project]
+name = "fpm-benchmark"
+version = "0.2.0"
+description = "QueryFPM revision with alert-bound safety facts and confidence-free suppression authorization."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+fpm-bench = "fpm_benchmark.cli:main"
+queryfpm-revision = "fpm_benchmark.revision_cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"

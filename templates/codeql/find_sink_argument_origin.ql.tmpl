@@ -1,0 +1,7 @@
+import java
+
+from MethodCall call, Expr arg
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and call.getLocation().getStartLine() = {{line}}
+  and arg = call.getAnArgument()
+select arg, "Sink argument candidate: " + arg.toString()

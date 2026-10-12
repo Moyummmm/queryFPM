@@ -1,0 +1,19 @@
+import java
+
+from MethodCall call, StringLiteral algorithm
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and call.getMethod().getName() = "getInstance"
+  and (
+    call.getMethod().getDeclaringType().hasQualifiedName("javax.crypto", "Cipher") or
+    call.getMethod().getDeclaringType().hasQualifiedName("java.security", "MessageDigest") or
+    call.getMethod().getDeclaringType().hasQualifiedName("javax.crypto", "Mac")
+  )
+  and algorithm = call.getArgument(0)
+  and (
+    call.getLocation().getStartLine() = {{line}} and call.getLocation().getStartColumn() = {{column}}
+    or algorithm.getLocation().getStartLine() = {{line}} and algorithm.getLocation().getStartColumn() = {{column}}
+  )
+select "fpm-bound-v1", "crypto_effective", "CWE-327",
+  call.getLocation().getFile().getRelativePath(), {{line}},
+  {{column}}, algorithm.toString(), algorithm.getValue(),
+  "constant-actual-algorithm-v1"

@@ -1,0 +1,2 @@
+# test name,category,real vulnerability,CWE,Benchmark version: 1.2
+BenchmarkTest00001,sql,TRUE,89,

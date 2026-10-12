@@ -1,0 +1,28 @@
+import java
+
+predicate randomnessSource(Expr source, string sourceKind) {
+  exists(ClassInstanceExpr newExpr |
+    source = newExpr and
+    (
+      newExpr.getConstructedType().hasQualifiedName("java.util", "Random") and
+      sourceKind = "java.util.Random"
+      or
+      newExpr.getConstructedType().hasQualifiedName("java.security", "SecureRandom") and
+      sourceKind = "java.security.SecureRandom"
+    )
+  )
+  or
+  exists(MethodCall call |
+    source = call and
+    call.getMethod().getDeclaringType().hasQualifiedName("java.lang", "Math") and
+    call.getMethod().getName() = "random" and
+    sourceKind = "java.lang.Math.random"
+  )
+}
+
+from Expr source, string sourceKind
+where source.getLocation().getFile().getRelativePath() = {{file}}
+  and source.getLocation().getStartLine() <= {{line}} + 30
+  and source.getLocation().getStartLine() >= {{line}} - 80
+  and randomnessSource(source, sourceKind)
+select source, "randomness source: " + sourceKind
