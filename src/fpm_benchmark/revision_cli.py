@@ -19,7 +19,7 @@ def main(argv=None):
     run=sub.add_parser("run")
     for name in ("config","input","out"): run.add_argument("--"+name,required=True)
     run.add_argument("--method",choices=["queryfpm","matched_one_shot","zerofalse_style","direct_llm","llm4sa_style"],default="queryfpm")
-    run.add_argument("--budget",type=int,choices=[0,1,2],default=2)
+    run.add_argument("--budget",type=int,choices=[0,1,2,3],default=2)
     run.add_argument("--guidance",choices=["base","generic"],default="generic")
     run.add_argument("--prefetch",action="store_true")
     run.add_argument("--replay")

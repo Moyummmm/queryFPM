@@ -77,7 +77,7 @@ def replay_action(evidence: dict, request: dict, archive: list[dict]) -> dict:
 def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
                   method: str = "queryfpm", budget: int = 2, guidance: bool = True,
                   prefetch: bool = False, query_executor=None, replay: list[dict] | None = None) -> dict:
-    if budget not in {0, 1, 2}: raise ValueError("budget must be 0/1/2")
+    if budget not in {0, 1, 2, 3}: raise ValueError("budget must be 0/1/2/3")
     e = copy.deepcopy(record)
     # New runs never inherit model output, trusted facts or successful action history.
     for k in ("decision", "authorization", "backend_facts", "llm_trace", "query_history", "supplemental_evidence"):
