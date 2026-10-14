@@ -18,7 +18,7 @@ from .cwe_profiles import profile_for
 from .revision_prompts import messages, normalize
 
 SEQUENCES = {
-    "CWE-089": ["find-sql-parameterization", "find-bound-fixed-sink", "find-bound-constant-value"],
+    "CWE-089": ["find-bound-constant-value", "find-sql-parameterization", "find-bound-fixed-sink"],
     "CWE-079": ["find-bound-fixed-sink", "find-bound-constant-value", "find-xss-encoder-nearby"],
     "CWE-078": ["find-bound-fixed-sink", "find-bound-constant-value", "find-command-execution-arguments"],
     "CWE-022": ["find-bound-fixed-sink", "find-bound-constant-value", "find-path-canonical-guard"],
