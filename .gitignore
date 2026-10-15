@@ -8,7 +8,9 @@ dist/
 *.egg-info/
 
 # Large experiment artifacts
-data/
+data/*
+!data/selected_labeled_200.csv
+!data/README.md
 benchmark-db/
 BenchmarkJava/
 codeql-home/
