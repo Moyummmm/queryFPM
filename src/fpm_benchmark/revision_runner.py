@@ -76,8 +76,19 @@ def replay_action(evidence: dict, request: dict, archive: list[dict]) -> dict:
 
 def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
                   method: str = "queryfpm", budget: int = 2, guidance: bool = True,
-                  prefetch: bool = False, query_executor=None, replay: list[dict] | None = None) -> dict:
+                  prefetch: bool = False, query_executor=None, replay: list[dict] | None = None,
+                  fp_policy=None, tp_policy=None) -> dict:
     if budget not in {0, 1, 2, 3}: raise ValueError("budget must be 0/1/2/3")
+    if fp_policy is not None and method != "queryfpm":
+        raise ValueError("The optional FP policy applies only to method=queryfpm")
+    if (cfg.get("fp_policy") or {}).get("mode") == "source_location_unverified" and fp_policy is None:
+        raise ValueError("Explicit FP configuration requires its frozen runtime policy")
+    if tp_policy is not None:
+        if method != "queryfpm":
+            raise ValueError("The optional TP policy applies only to method=queryfpm")
+        tp_policy.validate_input(record)
+    if (cfg.get("tp_policy") or {}).get("mode") == "semantic_tp_v2_1" and tp_policy is None:
+        raise ValueError("Explicit TP configuration requires its frozen runtime policy")
     e = copy.deepcopy(record)
     # New runs never inherit model output, trusted facts or successful action history.
     for k in ("decision", "authorization", "backend_facts", "llm_trace", "query_history", "supplemental_evidence"):
@@ -91,6 +102,14 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
     started = time.perf_counter()
     usage_total = {}
     infra_errors = []
+
+    def decision_gate(candidate, *, confirmed_action_exhaustion=False):
+        if fp_policy is not None and candidate["verdict"] == "FP":
+            return fp_policy.evaluate(e, candidate, infrastructure_errors=infra_errors)
+        if tp_policy is not None and candidate["verdict"] == "TP":
+            return tp_policy.evaluate(e, candidate, infrastructure_errors=infra_errors,
+                query_budget=budget, confirmed_action_exhaustion=confirmed_action_exhaustion)
+        return authorization(e, candidate["verdict"])
 
     def execute(request):
         start = time.perf_counter()
@@ -138,6 +157,7 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
             if execute(req).get("status") != "ok": break
     candidate = normalize(None)
     stop_reason = "budget_exhausted"
+    tp_actions_exhausted = False
     rounds = 1 if method != "queryfpm" or prefetch else budget + 1
     for round_id in range(rounds):
         prompt = messages(e, actions, guidance=guidance, method=method,
@@ -153,7 +173,7 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
         if "MALFORMED_LLM_OUTPUT" in candidate["missing_evidence"]: infra_errors.append("malformed_output")
         for k, v in usage.items():
             if isinstance(v, int): usage_total[k] = usage_total.get(k, 0) + v
-        gate = authorization(e, candidate["verdict"])
+        gate = decision_gate(candidate)
         final = candidate["sufficient"] and gate["authorized"]
         e["llm_trace"].append({"round": round_id + 1, "messages": prompt,
             "prompt_hash": canonical_hash(prompt), "raw_response": raw, "candidate": candidate,
@@ -168,12 +188,22 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
         request = select_action(e, candidate, actions)
         if request is None:
             stop_reason = "no_executable_action"
+            if (tp_policy is not None and candidate["verdict"] == "TP"
+                    and gate.get("reason") == "tp_wait_for_evidence" and not infra_errors):
+                after_exhaustion = decision_gate(candidate, confirmed_action_exhaustion=True)
+                if candidate["sufficient"] and after_exhaustion["authorized"]:
+                    e["llm_trace"][-1]["gate_before_action_exhaustion"] = gate
+                    e["llm_trace"][-1]["gate"] = after_exhaustion
+                    e["llm_trace"][-1]["controller_final"] = True
+                    e["llm_trace"][-1]["tp_actions_exhausted"] = True
+                    tp_actions_exhausted = True
+                    stop_reason = "tp_evidence_actions_exhausted"
             break
         status = execute(request).get("status")
         if status != "ok":
             stop_reason = "action_unavailable" if status == "unavailable" else "infrastructure_failure"
             break
-    gate = authorization(e, candidate["verdict"])
+    gate = decision_gate(candidate, confirmed_action_exhaustion=tp_actions_exhausted)
     e["candidate_decision"] = candidate
     e["authorization"] = gate
     if infra_errors:
@@ -181,7 +211,14 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
     elif method != "queryfpm":
         e["decision"] = {**candidate, "verdict": candidate["verdict"] if candidate["sufficient"] else "UNKNOWN"}
     elif candidate["sufficient"] and gate["authorized"]:
-        e["decision"] = candidate
+        if tp_policy is not None and candidate["verdict"] == "TP" and gate.get("gate_policy") == tp_policy.gate_version:
+            e["decision"] = {**candidate, "verification": gate["verification"]}
+            e["tp_reporting"] = {"status": gate["verification"], "gate_policy": tp_policy.gate_version,
+                "route": gate.get("route"), "original_gate": copy.deepcopy(gate.get("original_gate")),
+                "security_operation": "KEEP", "interpretation":
+                "TP classification based on model and static evidence; vulnerability not independently proven."}
+        else:
+            e["decision"] = candidate
     else:
         e["decision"] = {**candidate, "verdict": "UNKNOWN", "sufficient": False,
                          "retention_reason": gate["reason"]}
@@ -192,6 +229,13 @@ def triage_record(record: dict, *, client: Any, manifest: dict, cfg: dict,
     e["runtime_seconds"] = time.perf_counter() - started
     e["experiment_condition"] = {"method": method, "budget": budget, "guidance": guidance,
                                   "prefetch": prefetch, "language": language}
+    if fp_policy is not None:
+        e["fp_policy"] = fp_policy.metadata()
+        if gate.get("verification") == "unverified_high_recall":
+            e["decision"]["verification"] = gate["verification"]
+            e["decision"]["safety_proven"] = False
+    if tp_policy is not None:
+        e["tp_policy"] = tp_policy.metadata()
     return e
 
 
