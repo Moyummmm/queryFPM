@@ -1,0 +1,10 @@
+/**
+ * Placeholder evidence query.
+ * TODO: specialize after inspecting CodeQL SARIF paths for OWASP Benchmark.
+ */
+import java
+
+from Expr e
+where e.getLocation().getFile().getRelativePath() = {{file}}
+  and e.getLocation().getStartLine() = {{line}}
+select e, "Expression at suspected source location: " + e.toString()

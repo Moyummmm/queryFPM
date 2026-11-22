@@ -1,0 +1,18 @@
+import java
+
+pragma[noinline]
+predicate callPoint(MethodCall call, string file, int line, int column) {
+  exists(Location loc |
+    loc = call.getLocation() and file = loc.getFile().getRelativePath() and
+    line = loc.getStartLine() and column = loc.getStartColumn()
+  )
+}
+
+from MethodCall call, ClassInstanceExpr rng
+where callPoint(call, {{file}}, {{line}}, {{column}})
+  and call.getMethod().getName().regexpMatch("nextInt|nextLong|nextBytes|nextDouble|nextFloat|nextBoolean")
+  and call.getQualifier() = rng
+  and rng.getConstructedType().hasQualifiedName("java.security", "SecureRandom")
+  and rng.getNumArgument() = 0
+select "fpm-bound-v1", "secure_random", "CWE-330", {{file}}, {{line}}, {{column}},
+  rng.toString(), "java.security.SecureRandom default constructor", "direct-jdk-securerandom-v1"

@@ -1,0 +1,8 @@
+import java
+
+from MethodCall call
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and call.getLocation().getStartLine() <= {{line}} + 20
+  and call.getLocation().getStartLine() >= {{line}} - 20
+  and call.getMethod().getName().regexpMatch("(?i).*(sanitize|escape|encode|validate|allow|canonical).*")
+select call, "Sanitizer-like call near alert path for " + {{cwe}} + ": " + call.getMethod().getName()

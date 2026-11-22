@@ -1,0 +1,16 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 30 and
+  e.getLocation().getStartLine() >= {{line}} - 80
+}
+
+predicate xssEncoder(MethodCall call) {
+  call.getMethod().getName().regexpMatch("(?i)(encodeForHTML|encodeForHtml|escapeHtml|escapeHtml4|htmlEscape|escapeXml|encodeForJavaScript)")
+}
+
+from MethodCall call
+where inWindow(call)
+  and xssEncoder(call)
+select call, "XSS encoder/sanitizer call near alert: " + call.toString()

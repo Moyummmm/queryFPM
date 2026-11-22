@@ -1,0 +1,42 @@
+import java
+
+pragma[inline]
+predicate sinkArgument(Call call, int argIndex) {
+  {{cwe}} = "CWE-089" and argIndex = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.sql", "Statement") and
+  call.getCallee().getName().regexpMatch("execute|executeQuery|executeUpdate|addBatch")
+  or
+  {{cwe}} = "CWE-079" and argIndex = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.io", "PrintWriter") and
+  call.getCallee().getName().regexpMatch("print|println|write")
+  or
+  {{cwe}} = "CWE-078" and argIndex = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.lang", "Runtime") and
+  call.getCallee().hasName("exec")
+  or
+  {{cwe}} = "CWE-022" and argIndex = 0 and call instanceof ConstructorCall and
+  call.getNumArgument() = 1 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.io", "File")
+  or
+  {{cwe}} = "CWE-090" and argIndex = 1 and
+  call.getCallee().getDeclaringType().hasQualifiedName("javax.naming.directory", "DirContext") and
+  call.getCallee().hasName("search")
+  or
+  {{cwe}} = "CWE-643" and argIndex = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("javax.xml.xpath", "XPath") and
+  call.getCallee().getName().regexpMatch("evaluate|compile")
+}
+
+from Call call, StringLiteral arg, int argIndex
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and sinkArgument(call, argIndex)
+  and arg = call.getArgument(argIndex)
+  and (
+    {{cwe}} != "CWE-090" and
+    call.getLocation().getStartLine() = {{line}} and call.getLocation().getStartColumn() = {{column}}
+    or arg.getLocation().getStartLine() = {{line}} and arg.getLocation().getStartColumn() = {{column}}
+  )
+select "fpm-bound-v1", "literal_sink_argument", {{cwe}},
+  call.getLocation().getFile().getRelativePath(), {{line}},
+  {{column}}, arg.toString(), arg.getValue(),
+  "literal-actual-argument-v1"

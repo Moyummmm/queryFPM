@@ -1,0 +1,45 @@
+import java
+
+predicate prepareCall(MethodCall call, StringLiteral sql) {
+  call.getMethod().getDeclaringType().getASupertype*().hasQualifiedName("java.sql", "Connection") and
+  call.getMethod().getName().regexpMatch("prepareStatement|prepareCall") and
+  sql = call.getArgument(0)
+}
+
+predicate safeReceiver(MethodCall sink, MethodCall prep, StringLiteral sql) {
+  prepareCall(prep, sql) and
+  sink.getNumArgument() = 0 and
+  sink.getMethod().getName().regexpMatch("execute|executeQuery|executeUpdate|addBatch") and
+  sink.getMethod().getDeclaringType().getASupertype*().hasQualifiedName("java.sql", "PreparedStatement") and
+  (
+    sink.getQualifier() = prep
+    or
+    exists(VarAccess use, LocalVariableDeclExpr decl |
+      sink.getQualifier() = use and decl.getVariable() = use.getVariable() and
+      decl.getInit() = prep and prep.getEnclosingCallable() = sink.getEnclosingCallable() and
+      not exists(AssignExpr assign | assign.getDest().(VarAccess).getVariable() = use.getVariable()) and
+      not exists(VarAccess other |
+        other.getVariable() = use.getVariable() and
+        not exists(MethodCall operation |
+          operation.getQualifier() = other and
+          operation.getMethod().getName().regexpMatch("set[A-Z].*|execute|executeQuery|executeUpdate|clearParameters|addBatch|close")
+        )
+      )
+    )
+  )
+}
+
+from MethodCall sink, MethodCall prep, StringLiteral sql
+where sink.getLocation().getFile().getRelativePath() = {{file}}
+  and (
+    prepareCall(sink, sql) and prep = sink
+    or safeReceiver(sink, prep, sql)
+  )
+  and (
+    sink.getLocation().getStartLine() = {{line}} and sink.getLocation().getStartColumn() = {{column}}
+    or sql.getLocation().getStartLine() = {{line}} and sql.getLocation().getStartColumn() = {{column}}
+  )
+select "fpm-bound-v1", "sql_parameterized", "CWE-089",
+  sink.getLocation().getFile().getRelativePath(), {{line}},
+  {{column}}, prep.toString(), sql.getValue(),
+  "constant-sql-same-receiver-v1"

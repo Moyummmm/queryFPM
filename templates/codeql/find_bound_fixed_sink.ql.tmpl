@@ -1,0 +1,82 @@
+import java
+
+pragma[noinline]
+predicate point(Expr expression, string file, int line, int column) {
+  exists(Location loc |
+    loc = expression.getLocation() and file = loc.getFile().getRelativePath() and
+    line = loc.getStartLine() and column = loc.getStartColumn()
+  )
+}
+
+pragma[inline]
+predicate sinkArgument(Call call, int index) {
+  {{cwe}} = "CWE-089" and index = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.sql", "Statement") and
+  call.getCallee().getName().regexpMatch("execute|executeQuery|executeUpdate|addBatch")
+  or {{cwe}} = "CWE-079" and index = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.io", "PrintWriter") and
+  call.getCallee().getName().regexpMatch("print|println|write")
+  or {{cwe}} = "CWE-078" and index = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.lang", "Runtime") and
+  call.getCallee().hasName("exec")
+  or {{cwe}} = "CWE-022" and index = 0 and call instanceof ConstructorCall and
+  call.getNumArgument() = 1 and
+  call.getCallee().getDeclaringType().hasQualifiedName("java.io", "File")
+  or {{cwe}} = "CWE-090" and index = 1 and
+  call.getCallee().getDeclaringType().hasQualifiedName("javax.naming.directory", "DirContext") and
+  call.getCallee().hasName("search")
+  or {{cwe}} = "CWE-643" and index = 0 and
+  call.getCallee().getDeclaringType().hasQualifiedName("javax.xml.xpath", "XPath") and
+  call.getCallee().getName().regexpMatch("evaluate|compile")
+}
+
+predicate before(Expr left, Expr right) {
+  left.getLocation().getStartLine() < right.getLocation().getStartLine()
+  or left.getLocation().getStartLine() = right.getLocation().getStartLine() and
+     left.getLocation().getStartColumn() < right.getLocation().getStartColumn()
+}
+
+pragma[noinline]
+predicate overwrittenLocal(VarAccess use, string value) {
+  exists(LocalVariableDecl variable, AssignExpr reset, BlockStmt block |
+    use.getVariable() = variable and variable.getType().(RefType).hasQualifiedName("java.lang", "String") and
+    reset.getDest().(VarAccess).getVariable() = variable and
+    value = reset.getSource().(CompileTimeConstantExpr).getStringValue() and
+    reset.getEnclosingStmt() instanceof ExprStmt and
+    reset.getEnclosingStmt().getParent() = block and
+    use.getEnclosingStmt().getParent() = block and
+    reset.getEnclosingStmt().getIndex() < use.getEnclosingStmt().getIndex() and
+    // Reject every intervening assignment, including one inside a branch.
+    not exists(AssignExpr other |
+      other.getDest().(VarAccess).getVariable() = variable and other != reset and
+      before(reset, other) and before(other, use)
+    ) and
+    not exists(AssignOp other |
+      other.getDest().(VarAccess).getVariable() = variable and
+      before(reset, other) and before(other, use)
+    )
+  )
+}
+
+predicate fixedValue(Expr expression, string value, string kind) {
+  value = expression.(CompileTimeConstantExpr).getStringValue() and kind = "compile_time_sink_argument"
+  or overwrittenLocal(expression.(VarAccess), value) and kind = "safe_overwrite"
+  or exists(AddExpr addition, string left, string right, string leftKind, string rightKind |
+    expression = addition and addition.getType().(RefType).hasQualifiedName("java.lang", "String") and
+    fixedValue(addition.getLeftOperand(), left, leftKind) and
+    fixedValue(addition.getRightOperand(), right, rightKind) and
+    value = left + right and
+    (leftKind = "safe_overwrite" or rightKind = "safe_overwrite") and kind = "safe_overwrite"
+  )
+}
+
+from Call call, Expr arg, int index, string value, string kind, string proof
+where sinkArgument(call, index) and arg = call.getArgument(index)
+  and fixedValue(arg, value, kind)
+  and (point(call, {{file}}, {{line}}, {{column}}) or point(arg, {{file}}, {{line}}, {{column}}))
+  and (
+    kind = "compile_time_sink_argument" and proof = "compile-time-actual-argument-v1"
+    or kind = "safe_overwrite" and proof = "unconditional-local-string-overwrite-v1"
+  )
+select "fpm-bound-v1", kind, {{cwe}}, {{file}}, {{line}}, {{column}},
+  arg.toString(), value, proof

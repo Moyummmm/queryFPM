@@ -1,0 +1,4 @@
+{"templates":[{"id":"find-bound-literal-sink","file":"find_bound_literal_sink.ql.tmpl",
+"enabled":true,"language":"python","parameters":["file","line","column","cwe"],
+"cwe_categories":["CWE-078","CWE-089"],"description":"Resolved os.system/sqlite3 execution with a literal actual argument",
+"missing_evidence":"MISSING_BOUND_SAFETY_FACT"}]}

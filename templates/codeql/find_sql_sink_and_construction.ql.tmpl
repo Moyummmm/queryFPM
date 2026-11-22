@@ -1,0 +1,57 @@
+import java
+
+predicate inWindow(Element e) {
+  e.getLocation().getFile().getRelativePath() = {{file}} and
+  e.getLocation().getStartLine() <= {{line}} + 120 and
+  e.getLocation().getStartLine() >= {{line}} - 100
+}
+
+predicate constantStatus(Expr arg, string status) {
+  arg.isCompileTimeConstant() and status = "yes"
+  or
+  not arg.isCompileTimeConstant() and status = "no"
+}
+
+predicate sqlApi(MethodCall call) {
+  call.getMethod().getName().regexpMatch("(?i)(prepareStatement|execute|executeQuery|executeUpdate|query|queryForList|update|batchUpdate)")
+}
+
+predicate evidence(Expr node, string message) {
+  exists(MethodCall call, Expr arg, string status |
+    node = call and
+    inWindow(call) and
+    sqlApi(call) and
+    arg = call.getAnArgument() and
+    constantStatus(arg, status) and
+    message =
+      "SQL sink call: method=" + call.getMethod().getName() +
+      ", argument=" + arg.toString() +
+      ", argument_compile_time_constant=" + status
+  )
+  or
+  exists(LocalVariableDeclExpr decl, Expr init, string status |
+    node = decl and
+    inWindow(decl) and
+    decl.getName().regexpMatch("(?i)(sql|query|statement)") and
+    init = decl.getInit() and
+    constantStatus(init, status) and
+    message =
+      "SQL string construction: " + decl.getName() + " = " + init.toString() +
+      ", construction_compile_time_constant=" + status
+  )
+  or
+  exists(LocalVariableDeclExpr decl, Expr init, VarAccess var |
+    node = var and
+    inWindow(decl) and
+    decl.getName().regexpMatch("(?i)(sql|query|statement)") and
+    init = decl.getInit() and
+    var.getParent*() = init and
+    message =
+      "SQL construction variable: " + decl.getName() + " uses variable " +
+      var.getVariable().getName()
+  )
+}
+
+from Expr node, string message
+where evidence(node, message)
+select node, message

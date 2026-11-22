@@ -1,0 +1,12 @@
+import java
+from MethodCall call, StringLiteral name, StringLiteral value
+where call.getLocation().getFile().getRelativePath() = {{file}}
+  and call.getLocation().getStartLine() = {{line}} and call.getLocation().getStartColumn() = {{column}}
+  and (
+    call.getMethod().getDeclaringType().getASupertype*().hasQualifiedName("javax.servlet.http", "HttpSession") or
+    call.getMethod().getDeclaringType().getASupertype*().hasQualifiedName("jakarta.servlet.http", "HttpSession")
+  )
+  and call.getMethod().hasName("setAttribute")
+  and name = call.getArgument(0) and value = call.getArgument(1)
+select "fpm-bound-v1", "constant_trust_transfer", "CWE-501", {{file}}, {{line}}, {{column}},
+  call.toString(), "both name and value are literal server constants", "literal-name-and-value-v1"

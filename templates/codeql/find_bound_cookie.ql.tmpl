@@ -1,0 +1,41 @@
+import java
+
+predicate cookieType(RefType type) {
+  type.hasQualifiedName("javax.servlet.http", "Cookie") or
+  type.hasQualifiedName("jakarta.servlet.http", "Cookie")
+}
+
+pragma[noinline]
+predicate creationPoint(ClassInstanceExpr creation, string file, int line, int column) {
+  exists(Location loc |
+    loc = creation.getLocation() and file = loc.getFile().getRelativePath() and
+    line = loc.getStartLine() and column = loc.getStartColumn()
+  )
+}
+
+from ClassInstanceExpr creation, LocalVariableDeclExpr decl, MethodCall secure,
+     MethodCall send, BlockStmt block
+where creationPoint(creation, {{file}}, {{line}}, {{column}})
+  and cookieType(creation.getConstructedType()) and decl.getInit() = creation
+  and secure.getQualifier().(VarAccess).getVariable() = decl.getVariable()
+  and secure.getMethod().hasName("setSecure")
+  and cookieType(secure.getMethod().getDeclaringType())
+  and secure.getArgument(0).(BooleanLiteral).getBooleanValue() = true
+  and send.getMethod().hasName("addCookie")
+  and (
+    send.getMethod().getDeclaringType().hasQualifiedName("javax.servlet.http", "HttpServletResponse") or
+    send.getMethod().getDeclaringType().hasQualifiedName("jakarta.servlet.http", "HttpServletResponse")
+  )
+  and send.getArgument(0).(VarAccess).getVariable() = decl.getVariable()
+  and decl.getEnclosingStmt().getParent() = block
+  and secure.getEnclosingStmt().getParent() = block
+  and send.getEnclosingStmt().getParent() = block
+  and decl.getEnclosingStmt().getIndex() < secure.getEnclosingStmt().getIndex()
+  and secure.getEnclosingStmt().getIndex() < send.getEnclosingStmt().getIndex()
+  and not exists(AssignExpr assign | assign.getDest().(VarAccess).getVariable() = decl.getVariable())
+  and not exists(VarAccess use |
+    use.getVariable() = decl.getVariable() and use != secure.getQualifier() and use != send.getArgument(0)
+  )
+select "fpm-bound-v1", "cookie_secure", "CWE-614", {{file}}, {{line}}, {{column}},
+  creation.toString(), "unescaped local cookie has unconditional Secure=true before send",
+  "unescaped-local-cookie-secure-before-send-v1"

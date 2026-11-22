@@ -1,0 +1,20 @@
+import java
+
+// Materialize literal locations before matching the requested point. This avoids
+// joining each target's line independently with every file's locations.
+pragma[noinline]
+predicate literalPoint(StringLiteral arg, string file, int line, int column) {
+  exists(Location loc |
+    loc = arg.getLocation() and
+    file = loc.getFile().getRelativePath() and
+    line = loc.getStartLine() and column = loc.getStartColumn()
+  )
+}
+
+from StringLiteral arg, MethodCall call
+where literalPoint(arg, {{file}}, {{line}}, {{column}})
+  and call.getArgument(1) = arg
+  and call.getMethod().hasName("search")
+  and call.getMethod().getDeclaringType().hasQualifiedName("javax.naming.directory", "DirContext")
+select "fpm-bound-v1", "literal_sink_argument", "CWE-090", {{file}}, {{line}}, {{column}},
+  arg.toString(), arg.getValue(), "literal-actual-argument-v1"
